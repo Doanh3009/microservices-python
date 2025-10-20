@@ -1,0 +1,71 @@
+version: "3.8"
+
+services:
+  mysql-db:
+    image: mysql:8.0
+    container_name: mysql-db
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: foodfast
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+
+  users:
+    build: ./users
+    container_name: users
+    environment:
+      DB_HOST: mysql-db
+      DB_USER: root
+      DB_PASSWORD: password
+      DB_NAME: foodfast
+    ports:
+      - "5001:5001"
+    depends_on:
+      - mysql-db
+
+  products:
+    build: ./products
+    container_name: products
+    environment:
+      DB_HOST: mysql-db
+      DB_USER: root
+      DB_PASSWORD: password
+      DB_NAME: foodfast
+    ports:
+      - "5002:5002"
+    depends_on:
+      - mysql-db
+
+  orders:
+    build: ./orders
+    container_name: orders
+    environment:
+      DB_HOST: mysql-db
+      DB_USER: root
+      DB_PASSWORD: password
+      DB_NAME: foodfast
+    ports:
+      - "5003:5003"
+    depends_on:
+      - mysql-db
+      - users
+      - products
+
+  payments:
+    build: ./payments
+    container_name: payments
+    environment:
+      DB_HOST: mysql-db
+      DB_USER: root
+      DB_PASSWORD: password
+      DB_NAME: foodfast
+    ports:
+      - "5004:5004"
+    depends_on:
+      - mysql-db
+      - orders
+
+volumes:
+  mysql-data:
