@@ -1,71 +1,84 @@
-version: "3.8"
+version: '3.8'
 
 services:
-  mysql-db:
-    image: mysql:8.0
-    container_name: mysql-db
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: localhost
     environment:
-      MYSQL_ROOT_PASSWORD: password
-      MYSQL_DATABASE: foodfast
+      SA_PASSWORD: ${DB_PASSWORD}
+      ACCEPT_EULA: "Y"
     ports:
-      - "3306:3306"
-    volumes:
-      - mysql-data:/var/lib/mysql
+      - "1444:1433"
+    networks:
+      - foodfast-net
 
   users:
     build: ./users
-    container_name: users
+    container_name: users_service
     environment:
-      DB_HOST: mysql-db
-      DB_USER: root
-      DB_PASSWORD: password
-      DB_NAME: foodfast
+      DB_HOST: localhost
+      DB_PORT: 1433
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${USERS_DB}
     ports:
-      - "5001:5001"
+      - "${USERS_PORT}:5001"
     depends_on:
-      - mysql-db
+      - sqlserver
+    networks:
+      - foodfast-net
 
   products:
     build: ./products
-    container_name: products
+    container_name: products_service
     environment:
-      DB_HOST: mysql-db
-      DB_USER: root
-      DB_PASSWORD: password
-      DB_NAME: foodfast
+      DB_HOST: localhost
+      DB_PORT: 1433
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${PRODUCTS_DB}
     ports:
-      - "5002:5002"
+      - "${PRODUCTS_PORT}:5002"
     depends_on:
-      - mysql-db
+      - sqlserver
+    networks:
+      - foodfast-net
 
   orders:
     build: ./orders
-    container_name: orders
+    container_name: orders_service
     environment:
-      DB_HOST: mysql-db
-      DB_USER: root
-      DB_PASSWORD: password
-      DB_NAME: foodfast
+      DB_HOST: localhost
+      DB_PORT: 1433
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${ORDERS_DB}
     ports:
-      - "5003:5003"
+      - "${ORDERS_PORT}:5003"
     depends_on:
-      - mysql-db
+      - sqlserver
       - users
       - products
+    networks:
+      - foodfast-net
 
   payments:
     build: ./payments
-    container_name: payments
+    container_name: payments_service
     environment:
-      DB_HOST: mysql-db
-      DB_USER: root
-      DB_PASSWORD: password
-      DB_NAME: foodfast
+      DB_HOST: localhost
+      DB_PORT: 1444
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${PAYMENTS_DB}
     ports:
-      - "5004:5004"
+      - "${PAYMENTS_PORT}:5004"
     depends_on:
-      - mysql-db
+      - sqlserver
       - orders
+    networks:
+      - foodfast-net
 
-volumes:
-  mysql-data:
+networks:
+  foodfast-net:
+    driver: bridge

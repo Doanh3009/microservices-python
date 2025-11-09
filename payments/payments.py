@@ -1,65 +1,222 @@
 from flask import Flask, request, jsonify
-import requests
-from sqlalchemy import create_engine, Column, Integer, Float, String
+from sqlalchemy import create_engine, Column, Integer, Float, String, text
 from sqlalchemy.orm import declarative_base, sessionmaker
+from flask_cors import CORS
+from dotenv import load_dotenv
 import os
+import requests
+
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 app = Flask(__name__)
+CORS(app, origins=["http://localhost:3000"])
 
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "password")
-DB_NAME = os.getenv("DB_NAME", "foodfast")
+DB_USER = os.getenv("DB_USER")
+DB_PASS = os.getenv("DB_PASSWORD")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+DB_NAME = os.getenv("PAYMENTS_DB")
 
-engine = create_engine(f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:3306/{DB_NAME}")
+engine = create_engine(f"mssql+pymssql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
 Base = declarative_base()
+Session = sessionmaker(bind=engine)
 
 class Payment(Base):
     __tablename__ = "payments"
     id = Column(Integer, primary_key=True, autoincrement=True)
     order_id = Column(Integer)
     amount = Column(Float)
+    method = Column(String(50))
     status = Column(String(50))
 
 Base.metadata.create_all(engine)
-Session = sessionmaker(bind=engine)
-session = Session()
 
-@app.route("/pay", methods=["POST"])
+def get_order_total(order_id):
+    """Fetch order total from Orders service"""
+    try:
+        response = requests.get(f"http://localhost:5003/orders/{order_id}")
+        if response.status_code == 200:
+            order = response.json()
+            return order.get('total', 0)
+        return 0
+    except:
+        return 0
+
+@app.route("/payments", methods=["POST"])
 def make_payment():
-    data = request.json
-    order_resp = requests.get(f"http://orders:5003/orders/{data['order_id']}")
+    session = Session()
+    try:
+        data = request.json
+        order_id = int(data["order_id"])
+        method = data["method"]
+        status = data.get("status", "Pending")
+        
+        if order_id <= 0:
+            return jsonify({"error": "Order ID must be positive"}), 400
+        
+        if not method:
+            return jsonify({"error": "Payment method is required"}), 400
+        
+        # Get amount from order
+        amount = get_order_total(order_id)
+        if amount <= 0:
+            return jsonify({"error": "Invalid order or order total is 0"}), 400
+        
+        custom_id = data.get("id")
+        
+        if custom_id:
+            custom_id = int(custom_id)
+            if custom_id <= 0:
+                return jsonify({"error": "ID must be positive"}), 400
+                
+            existing = session.query(Payment).filter(Payment.id == custom_id).first()
+            if existing:
+                return jsonify({"error": "ID already exists"}), 409
+            
+            try:
+                session.execute(text("SET IDENTITY_INSERT payments ON"))
+                payment = Payment(id=custom_id, order_id=order_id, amount=amount, method=method, status=status)
+                session.add(payment)
+                session.commit()
+                session.execute(text("SET IDENTITY_INSERT payments OFF"))
+                session.commit()
+                return jsonify({
+                    "message": "Payment created with custom ID",
+                    "id": payment.id,
+                    "amount": amount,
+                    "status": status
+                }), 201
+            except Exception as e:
+                session.rollback()
+                session.execute(text("SET IDENTITY_INSERT payments OFF"))
+                session.commit()
+                raise e
+        else:
+            payment = Payment(order_id=order_id, amount=amount, method=method, status=status)
+            session.add(payment)
+            session.commit()
+            return jsonify({
+                "message": "Payment created",
+                "id": payment.id,
+                "amount": amount,
+                "status": status
+            }), 201
+            
+    except ValueError:
+        return jsonify({"error": "Invalid data format"}), 400
+    except Exception as e:
+        session.rollback()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        session.close()
 
-    if order_resp.status_code != 200:
-        return jsonify({"error": "Order not found"}), 400
-
-    order_data = order_resp.json()
-    new_payment = Payment(order_id=data["order_id"], amount=order_data["total"], status="success")
-    session.add(new_payment)
-    session.commit()
-
-    return jsonify({"message": "Payment successful", "payment_id": new_payment.id, "amount": order_data["total"]}), 201
-
-@app.route("/pay", methods=["GET"])
+@app.route("/payments", methods=["GET"])
 def list_payments():
-    payments = session.query(Payment).all()
-    return jsonify([{"id": p.id, "order_id": p.order_id, "amount": p.amount, "status": p.status} for p in payments])
+    session = Session()
+    try:
+        search = request.args.get('search', '').strip()
+        query = session.query(Payment)
+        
+        if search:
+            try:
+                search_id = int(search)
+                query = query.filter((Payment.id == search_id) | (Payment.order_id == search_id))
+            except ValueError:
+                query = query.filter(
+                    (Payment.method.like(f"%{search}%")) | 
+                    (Payment.status.like(f"%{search}%"))
+                )
+        
+        payments = query.all()
+        return jsonify([{
+            "id": p.id,
+            "order_id": p.order_id,
+            "amount": p.amount,
+            "method": p.method,
+            "status": p.status
+        } for p in payments])
+    finally:
+        session.close()
 
-@app.route("/pay/<int:payment_id>", methods=["GET"])
-def get_payment(payment_id):
-    payment = session.query(Payment).filter_by(id=payment_id).first()
-    if not payment:
-        return jsonify({"error": "Payment not found"}), 404
-    return jsonify({"id": payment.id, "order_id": payment.order_id, "amount": payment.amount, "status": payment.status})
+@app.route("/payments/<int:id>", methods=["PUT"])
+def update_payment(id):
+    session = Session()
+    try:
+        data = request.json
+        payment = session.query(Payment).filter(Payment.id == id).first()
+        
+        if not payment:
+            return jsonify({"error": "Payment not found"}), 404
+        
+        new_id = data.get("id")
+        
+        if new_id and int(new_id) != id:
+            new_id = int(new_id)
+            if new_id <= 0:
+                return jsonify({"error": "ID must be positive"}), 400
+                
+            existing = session.query(Payment).filter(Payment.id == new_id).first()
+            if existing:
+                return jsonify({"error": "New ID already exists"}), 409
+            
+            old_order_id = payment.order_id
+            old_amount = payment.amount
+            old_method = payment.method
+            old_status = payment.status
+            
+            session.delete(payment)
+            session.commit()
+            
+            try:
+                session.execute(text("SET IDENTITY_INSERT payments ON"))
+                new_payment = Payment(
+                    id=new_id,
+                    order_id=data.get("order_id", old_order_id),
+                    amount=data.get("amount", old_amount),
+                    method=data.get("method", old_method),
+                    status=data.get("status", old_status)
+                )
+                session.add(new_payment)
+                session.commit()
+                session.execute(text("SET IDENTITY_INSERT payments OFF"))
+                session.commit()
+                return jsonify({"message": "Payment updated with new ID", "new_id": new_id}), 200
+            except Exception as e:
+                session.rollback()
+                session.execute(text("SET IDENTITY_INSERT payments OFF"))
+                session.commit()
+                raise e
+        else:
+            payment.order_id = data.get("order_id", payment.order_id)
+            payment.amount = data.get("amount", payment.amount)
+            payment.method = data.get("method", payment.method)
+            payment.status = data.get("status", payment.status)
+            session.commit()
+            return jsonify({"message": "Payment updated"}), 200
+            
+    except ValueError:
+        return jsonify({"error": "Invalid data format"}), 400
+    except Exception as e:
+        session.rollback()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        session.close()
 
-@app.route("/pay/<int:payment_id>", methods=["DELETE"])
-def delete_payment(payment_id):
-    payment = session.query(Payment).filter_by(id=payment_id).first()
-    if not payment:
-        return jsonify({"error": "Payment not found"}), 404
-    session.delete(payment)
-    session.commit()
-    return jsonify({"message": "Payment deleted"})
+@app.route("/payments/<int:id>", methods=["DELETE"])
+def delete_payment(id):
+    session = Session()
+    try:
+        payment = session.query(Payment).filter(Payment.id == id).first()
+        if not payment:
+            return jsonify({"error": "Payment not found"}), 404
+        session.delete(payment)
+        session.commit()
+        return jsonify({"message": "Payment deleted"}), 200
+    except Exception as e:
+        session.rollback()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        session.close()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5004)
+    app.run(host="0.0.0.0", port=int(os.getenv("PAYMENTS_PORT", 5004)), debug=True)
