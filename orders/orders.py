@@ -38,16 +38,17 @@ def init_db():
             with master_engine.connect() as conn:
                 conn.execute(text(f"IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'{DB_NAME}') CREATE DATABASE [{DB_NAME}]"))
             print(f"Database '{DB_NAME}' is ready.")
-            break
+            break # Thành công, thoát vòng lặp
         except exc.SQLAlchemyError as e:
             print(f"Error creating database (hoặc DB chưa sẵn sàng): {e}")
             retries -= 1
-            time.sleep(5)
+            time.sleep(5) # Chờ 5 giây rồi thử lại
     
     master_engine.dispose()
     if retries == 0:
         raise Exception(f"Không thể tạo hoặc kết nối đến database {DB_NAME}")
 
+    # 3. Bây giờ mới tạo engine chính kết nối đến database của service
     db_engine = create_engine(f"mssql+pymssql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}", pool_pre_ping=True)
     return db_engine
 # ===============================
@@ -62,7 +63,7 @@ class Order(Base):
     user_id = Column(Integer)
     product_ids = Column(String(1000))  # comma-separated: "1,2,3"
     total = Column(Float)
-    # --- THÊM DÒNG NÀY ---
+    # --- THÊM TRẠNG THÁI ---
     status = Column(String(50), default="Pending") # Trạng thái: Pending, Delivering, Completed
 
 Base.metadata.create_all(engine)
@@ -221,7 +222,7 @@ def product_list_to_field(lst):
 
 # ---- Routes ----
 
-@app.route("/orders", methods=["POST"])
+@app.route("/orders/", methods=["POST"])
 def create_order():
     session = Session()
     try:
@@ -255,9 +256,6 @@ def create_order():
                 missing.append(pid)
 
         if missing:
-            # don't block creation because of remote service — still allow but warn
-            # you can decide to reject instead; here we allow but set price 0 for missing
-            # return jsonify({"error": f"Some products not found: {missing}"}), 400
             pass
 
         product_ids_str = product_list_to_field(product_ids)
@@ -272,7 +270,7 @@ def create_order():
                 return jsonify({"error": "ID already exists"}), 409
             try:
                 session.execute(text("SET IDENTITY_INSERT orders ON"))
-                # --- SỬA DÒNG NÀY ---
+                # --- SỬA: Thêm status="Pending"
                 order = Order(id=custom_id, user_id=int(user_id), product_ids=product_ids_str, total=total, status="Pending")
                 session.add(order)
                 session.commit()
@@ -285,7 +283,7 @@ def create_order():
                 session.commit()
                 return jsonify({"error": str(e)}), 500
         else:
-            # --- SỬA DÒNG NÀY ---
+            # --- SỬA: Thêm status="Pending"
             order = Order(user_id=int(user_id), product_ids=product_ids_str, total=total, status="Pending")
             session.add(order)
             session.commit()
@@ -299,7 +297,7 @@ def create_order():
     finally:
         session.close()
 
-@app.route("/orders", methods=["GET"])
+@app.route("/orders/", methods=["GET"])
 def list_orders():
     session = Session()
     try:
@@ -349,14 +347,14 @@ def list_orders():
                 "product_ids": o.product_ids,
                 "product_list": products_info,
                 "total": o.total,
-                # --- THÊM DÒNG NÀY ---
+                # --- SỬA: Thêm status
                 "status": o.status
             })
         return jsonify(result)
     finally:
         session.close()
 
-@app.route("/orders/<int:id>", methods=["GET"])
+@app.route("/orders/<int:id>/", methods=["GET"])
 def get_order(id):
     session = Session()
     try:
@@ -385,13 +383,13 @@ def get_order(id):
             "product_ids": order.product_ids,
             "product_list": products_info,
             "total": order.total,
-            # --- THÊM DÒNG NÀY ---
+            # --- SỬA: Thêm status
             "status": order.status
         })
     finally:
         session.close()
 
-@app.route("/orders/<int:id>", methods=["PUT"])
+@app.route("/orders/<int:id>/", methods=["PUT"])
 def update_order(id):
     session = Session()
     try:
@@ -418,14 +416,18 @@ def update_order(id):
                 new_product_ids = parse_product_ids_field(new_product_ids_field)
 
             # recalc total
-            prods = get_products_by_ids(new_product_ids)
             total = 0.0
-            for pid in new_product_ids:
-                p = prods.get(pid)
-                if p and p.get("price") is not None:
-                    try:
-                        total += float(p["price"])
-            # SỬA: Lấy status cũ
+            if new_product_ids: # Chỉ tính nếu có product_ids
+                prods = get_products_by_ids(new_product_ids)
+                for pid in new_product_ids:
+                    p = prods.get(pid)
+                    if p and p.get("price") is not None:
+                        try:
+                            total += float(p["price"])
+                        except Exception:
+                            pass # Bỏ qua nếu giá bị lỗi
+
+            # SỬA: Lấy status cũ (Dòng 429 của bạn)
             old_status = order.status
             
             # delete and re-insert with new id (since you're doing identity insert)
@@ -455,21 +457,25 @@ def update_order(id):
             # update without changing ID
             if "user_id" in data:
                 order.user_id = int(data["user_id"])
+            
+            # SỬA LỖI: Chỉ tính lại total KHI product_ids được cung cấp
             if "product_ids" in data:
                 product_ids_field = data["product_ids"]
                 if isinstance(product_ids_field, list):
                     product_ids = product_ids_field
                 else:
                     product_ids = parse_product_ids_field(product_ids_field)
-                prods = get_products_by_ids(product_ids)
+                
                 total = 0.0
-                for pid in product_ids:
-                    p = prods.get(pid)
-                    if p and p.get("price") is not None:
-                        try:
-                            total += float(p["price"])
-                        except Exception:
-                            pass
+                if product_ids: # Chỉ tính nếu có product_ids
+                    prods = get_products_by_ids(product_ids)
+                    for pid in product_ids:
+                        p = prods.get(pid)
+                        if p and p.get("price") is not None:
+                            try:
+                                total += float(p["price"])
+                            except Exception:
+                                pass
                 order.product_ids = product_list_to_field(product_ids)
                 order.total = total
             
@@ -489,7 +495,7 @@ def update_order(id):
     finally:
         session.close()
 
-@app.route("/orders/<int:id>", methods=["DELETE"])
+@app.route("/orders/<int:id>/", methods=["DELETE"])
 def delete_order(id):
     session = Session()
     try:

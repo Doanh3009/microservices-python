@@ -27,18 +27,22 @@ def init_db():
         isolation_level="AUTOCOMMIT"
     )
     
-    # 2. Gửi lệnh CREATE DATABASE nếu chưa tồn tại
-    try:
-        with master_engine.connect() as conn:
-            conn.execute(text(f"IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'{DB_NAME}') CREATE DATABASE [{DB_NAME}]"))
-        print(f"Database '{DB_NAME}' is ready.")
-    except exc.SQLAlchemyError as e:
-        print(f"Error creating database: {e}")
-        # Thử lại nếu DB chưa sẵn sàng
-        time.sleep(5)
-        init_db() # Cẩn thận: đệ quy
-    finally:
-        master_engine.dispose()
+    # SỬA: Tăng số lần thử lên 15
+    retries = 30
+    while retries > 0:
+        try:
+            with master_engine.connect() as conn:
+                conn.execute(text(f"IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'{DB_NAME}') CREATE DATABASE [{DB_NAME}]"))
+            print(f"Database '{DB_NAME}' is ready.")
+            break # Thành công, thoát vòng lặp
+        except exc.SQLAlchemyError as e:
+            print(f"Error creating database (hoặc DB chưa sẵn sàng): {e}")
+            retries -= 1
+            time.sleep(5) # Chờ 5 giây rồi thử lại
+    
+    master_engine.dispose()
+    if retries == 0:
+        raise Exception(f"Không thể tạo hoặc kết nối đến database {DB_NAME}")
 
     # 3. Bây giờ mới tạo engine chính kết nối đến database của service
     db_engine = create_engine(f"mssql+pymssql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
@@ -62,20 +66,18 @@ def validate_email(email):
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
-@app.route("/users", methods=["POST"])
+@app.route("/users/", methods=["POST"])
 def create_user():
     session = Session()
     try:
         data = request.json
         
-        # Validate email
         email = data.get("email", "").strip()
         if not validate_email(email):
             return jsonify({"error": "Invalid email format. Email must contain @ and domain (e.g., user@gmail.com)"}), 400
         
         custom_id = data.get("id")
         
-        # If custom ID provided
         if custom_id:
             custom_id = int(custom_id)
             if custom_id <= 0:
@@ -85,7 +87,6 @@ def create_user():
             if existing_user:
                 return jsonify({"error": "ID already exists"}), 409
             
-            # Check duplicate email
             existing_email = session.query(User).filter(User.email == email).first()
             if existing_email:
                 return jsonify({"error": "Email already exists"}), 409
@@ -104,7 +105,6 @@ def create_user():
                 session.commit()
                 raise e
         else:
-            # Check duplicate email
             existing_email = session.query(User).filter(User.email == email).first()
             if existing_email:
                 return jsonify({"error": "Email already exists"}), 409
@@ -122,7 +122,7 @@ def create_user():
     finally:
         session.close()
 
-@app.route("/users", methods=["GET"])
+@app.route("/users/", methods=["GET"])
 def list_users():
     session = Session()
     try:
@@ -140,11 +140,10 @@ def list_users():
     finally:
         session.close()
 
-@app.route("/users/<int:id>", methods=["PUT"])
+@app.route("/users/<int:id>/", methods=["PUT"])
 def update_user(id):
     session = Session()
     try:
-        # Reject negative IDs
         if id < 0:
             return jsonify({"error": "Invalid user ID"}), 400
             
@@ -154,13 +153,11 @@ def update_user(id):
         if not user:
             return jsonify({"error": "User not found"}), 404
         
-        # Validate email if provided
         if "email" in data:
             email = data["email"].strip()
             if not validate_email(email):
                 return jsonify({"error": "Invalid email format. Email must contain @ and domain (e.g., user@gmail.com)"}), 400
             
-            # Check duplicate email (excluding current user)
             existing_email = session.query(User).filter(
                 User.email == email,
                 User.id != id
@@ -225,7 +222,7 @@ def update_user(id):
     finally:
         session.close()
 
-@app.route("/users/<int:id>", methods=["DELETE"])
+@app.route("/users/<int:id>/", methods=["DELETE"])
 def delete_user(id):
     session = Session()
     try:

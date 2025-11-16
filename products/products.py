@@ -24,16 +24,22 @@ def init_db():
         isolation_level="AUTOCOMMIT"
     )
     
-    try:
-        with master_engine.connect() as conn:
-            conn.execute(text(f"IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'{DB_NAME}') CREATE DATABASE [{DB_NAME}]"))
-        print(f"Database '{DB_NAME}' is ready.")
-    except exc.SQLAlchemyError as e:
-        print(f"Error creating database: {e}")
-        time.sleep(5)
-        init_db()
-    finally:
-        master_engine.dispose()
+    # SỬA: Tăng số lần thử lên 15
+    retries = 50
+    while retries > 0:
+        try:
+            with master_engine.connect() as conn:
+                conn.execute(text(f"IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'{DB_NAME}') CREATE DATABASE [{DB_NAME}]"))
+            print(f"Database '{DB_NAME}' is ready.")
+            break
+        except exc.SQLAlchemyError as e:
+            print(f"Error creating database (hoặc DB chưa sẵn sàng): {e}")
+            retries -= 1
+            time.sleep(5)
+    
+    master_engine.dispose()
+    if retries == 0:
+        raise Exception(f"Không thể tạo hoặc kết nối đến database {DB_NAME}")
 
     db_engine = create_engine(f"mssql+pymssql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
     return db_engine
@@ -51,7 +57,8 @@ class Product(Base):
 
 Base.metadata.create_all(engine)
 
-@app.route("/products", methods=["POST"])
+# SỬA: Thêm dấu /
+@app.route("/products/", methods=["POST"])
 def create_product():
     session = Session()
     try:
@@ -101,7 +108,8 @@ def create_product():
     finally:
         session.close()
 
-@app.route("/products", methods=["GET"])
+# SỬA: Thêm dấu /
+@app.route("/products/", methods=["GET"])
 def list_products():
     session = Session()
     try:
@@ -116,7 +124,8 @@ def list_products():
     finally:
         session.close()
 
-@app.route("/products/<int:id>", methods=["PUT"])
+# SỬA: Thêm dấu /
+@app.route("/products/<int:id>/", methods=["PUT"])
 def update_product(id):
     session = Session()
     try:
@@ -168,7 +177,8 @@ def update_product(id):
                 raise e
         else:
             product.name = data.get("name", product.name)
-            product.price = data.get("price", product.price)
+            if "price" in data:
+                 product.price = data["price"] # Sửa lỗi gõ sai
             session.commit()
             return jsonify({"message": "Product updated"}), 200
             
@@ -180,7 +190,8 @@ def update_product(id):
     finally:
         session.close()
 
-@app.route("/products/<int:id>", methods=["DELETE"])
+# SỬA: Thêm dấu /
+@app.route("/products/<int:id>/", methods=["DELETE"])
 def delete_product(id):
     session = Session()
     try:
