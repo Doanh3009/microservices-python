@@ -1,10 +1,11 @@
 from flask import Flask, request, jsonify
-from sqlalchemy import create_engine, Column, Integer, String, text
+from sqlalchemy import create_engine, Column, Integer, String, text, exc
 from sqlalchemy.orm import declarative_base, sessionmaker
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os
 import re
+import time
 
 # Load env
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
@@ -16,9 +17,35 @@ DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASSWORD")
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
-DB_NAME = os.getenv("USERS_DB")
+DB_NAME = os.getenv("USERS_DB") # Đọc USERS_DB từ .env
 
-engine = create_engine(f"mssql+pymssql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+# === LOGIC TỰ TẠO DATABASE ===
+def init_db():
+    # 1. Kết nối đến 'master' db trước
+    master_engine = create_engine(
+        f"mssql+pymssql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/master",
+        isolation_level="AUTOCOMMIT"
+    )
+    
+    # 2. Gửi lệnh CREATE DATABASE nếu chưa tồn tại
+    try:
+        with master_engine.connect() as conn:
+            conn.execute(text(f"IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'{DB_NAME}') CREATE DATABASE [{DB_NAME}]"))
+        print(f"Database '{DB_NAME}' is ready.")
+    except exc.SQLAlchemyError as e:
+        print(f"Error creating database: {e}")
+        # Thử lại nếu DB chưa sẵn sàng
+        time.sleep(5)
+        init_db() # Cẩn thận: đệ quy
+    finally:
+        master_engine.dispose()
+
+    # 3. Bây giờ mới tạo engine chính kết nối đến database của service
+    db_engine = create_engine(f"mssql+pymssql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+    return db_engine
+# ===============================
+
+engine = init_db() # Chạy logic init
 Base = declarative_base()
 Session = sessionmaker(bind=engine)
 
@@ -28,7 +55,7 @@ class User(Base):
     name = Column(String(100))
     email = Column(String(100))
 
-Base.metadata.create_all(engine)
+Base.metadata.create_all(engine) # Tạo bảng
 
 def validate_email(email):
     """Validate email format"""

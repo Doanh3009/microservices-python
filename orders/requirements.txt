@@ -1,5 +1,7 @@
 Flask
 SQLAlchemy
-pymysql
 requests
 cryptography
+Flask-Cors
+python-dotenv
+pymssql

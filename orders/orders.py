@@ -1,6 +1,6 @@
 # orders_service.py
 from flask import Flask, request, jsonify
-from sqlalchemy import create_engine, Column, Integer, Float, String, text
+from sqlalchemy import create_engine, Column, Integer, Float, String, text, exc
 from sqlalchemy.orm import declarative_base, sessionmaker
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -19,14 +19,40 @@ DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASSWORD")
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
-DB_NAME = os.getenv("ORDERS_DB")
+DB_NAME = os.getenv("ORDERS_DB") # Đọc ORDERS_DB
 ORDERS_PORT = int(os.getenv("ORDERS_PORT", 5003))
 
-USERS_BASE = os.getenv("USERS_BASE", "http://localhost:5001")     # ex: http://localhost:5001
-PRODUCTS_BASE = os.getenv("PRODUCTS_BASE", "http://localhost:5002") # ex: http://localhost:5002
+USERS_BASE = os.getenv("USERS_BASE", "http://localhost:5001")
+PRODUCTS_BASE = os.getenv("PRODUCTS_BASE", "http://localhost:5002")
 
-# DB engine (keep your existing mssql+pymssql string)
-engine = create_engine(f"mssql+pymssql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}", pool_pre_ping=True)
+# === LOGIC TỰ TẠO DATABASE ===
+def init_db():
+    master_engine = create_engine(
+        f"mssql+pymssql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/master",
+        isolation_level="AUTOCOMMIT"
+    )
+    
+    retries = 5
+    while retries > 0:
+        try:
+            with master_engine.connect() as conn:
+                conn.execute(text(f"IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'{DB_NAME}') CREATE DATABASE [{DB_NAME}]"))
+            print(f"Database '{DB_NAME}' is ready.")
+            break
+        except exc.SQLAlchemyError as e:
+            print(f"Error creating database (hoặc DB chưa sẵn sàng): {e}")
+            retries -= 1
+            time.sleep(5)
+    
+    master_engine.dispose()
+    if retries == 0:
+        raise Exception(f"Không thể tạo hoặc kết nối đến database {DB_NAME}")
+
+    db_engine = create_engine(f"mssql+pymssql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}", pool_pre_ping=True)
+    return db_engine
+# ===============================
+
+engine = init_db()
 Base = declarative_base()
 Session = sessionmaker(bind=engine)
 
@@ -36,6 +62,8 @@ class Order(Base):
     user_id = Column(Integer)
     product_ids = Column(String(1000))  # comma-separated: "1,2,3"
     total = Column(Float)
+    # --- THÊM DÒNG NÀY ---
+    status = Column(String(50), default="Pending") # Trạng thái: Pending, Delivering, Completed
 
 Base.metadata.create_all(engine)
 
@@ -244,7 +272,8 @@ def create_order():
                 return jsonify({"error": "ID already exists"}), 409
             try:
                 session.execute(text("SET IDENTITY_INSERT orders ON"))
-                order = Order(id=custom_id, user_id=int(user_id), product_ids=product_ids_str, total=total)
+                # --- SỬA DÒNG NÀY ---
+                order = Order(id=custom_id, user_id=int(user_id), product_ids=product_ids_str, total=total, status="Pending")
                 session.add(order)
                 session.commit()
                 session.execute(text("SET IDENTITY_INSERT orders OFF"))
@@ -256,7 +285,8 @@ def create_order():
                 session.commit()
                 return jsonify({"error": str(e)}), 500
         else:
-            order = Order(user_id=int(user_id), product_ids=product_ids_str, total=total)
+            # --- SỬA DÒNG NÀY ---
+            order = Order(user_id=int(user_id), product_ids=product_ids_str, total=total, status="Pending")
             session.add(order)
             session.commit()
             return jsonify({"message": "Order created", "id": order.id, "total": total}), 201
@@ -318,7 +348,9 @@ def list_orders():
                 "user_name": user_name,
                 "product_ids": o.product_ids,
                 "product_list": products_info,
-                "total": o.total
+                "total": o.total,
+                # --- THÊM DÒNG NÀY ---
+                "status": o.status
             })
         return jsonify(result)
     finally:
@@ -352,7 +384,9 @@ def get_order(id):
             "user_name": user_name,
             "product_ids": order.product_ids,
             "product_list": products_info,
-            "total": order.total
+            "total": order.total,
+            # --- THÊM DÒNG NÀY ---
+            "status": order.status
         })
     finally:
         session.close()
@@ -391,15 +425,22 @@ def update_order(id):
                 if p and p.get("price") is not None:
                     try:
                         total += float(p["price"])
-                    except Exception:
-                        pass
-
+            # SỬA: Lấy status cũ
+            old_status = order.status
+            
             # delete and re-insert with new id (since you're doing identity insert)
             session.delete(order)
             session.commit()
             try:
                 session.execute(text("SET IDENTITY_INSERT orders ON"))
-                new_order = Order(id=new_id, user_id=new_user_id, product_ids=product_list_to_field(new_product_ids), total=total)
+                # SỬA: Thêm status
+                new_order = Order(
+                    id=new_id, 
+                    user_id=new_user_id, 
+                    product_ids=product_list_to_field(new_product_ids), 
+                    total=total,
+                    status=data.get("status", old_status) # Thêm dòng này
+                )
                 session.add(new_order)
                 session.commit()
                 session.execute(text("SET IDENTITY_INSERT orders OFF"))
@@ -431,6 +472,12 @@ def update_order(id):
                             pass
                 order.product_ids = product_list_to_field(product_ids)
                 order.total = total
+            
+            # --- THÊM KHỐI NÀY ---
+            if "status" in data:
+                order.status = data["status"]
+            # ---------------------
+                
             session.commit()
             return jsonify({"message": "Order updated"}), 200
 

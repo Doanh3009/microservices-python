@@ -1,10 +1,11 @@
 from flask import Flask, request, jsonify
-from sqlalchemy import create_engine, Column, Integer, Float, String, text
+from sqlalchemy import create_engine, Column, Integer, Float, String, text, exc
 from sqlalchemy.orm import declarative_base, sessionmaker
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os
 import requests
+import time
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
@@ -15,9 +16,31 @@ DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASSWORD")
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
-DB_NAME = os.getenv("PAYMENTS_DB")
+DB_NAME = os.getenv("PAYMENTS_DB") # Đọc PAYMENTS_DB
 
-engine = create_engine(f"mssql+pymssql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+# === LOGIC TỰ TẠO DATABASE ===
+def init_db():
+    master_engine = create_engine(
+        f"mssql+pymssql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/master",
+        isolation_level="AUTOCOMMIT"
+    )
+    
+    try:
+        with master_engine.connect() as conn:
+            conn.execute(text(f"IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'{DB_NAME}') CREATE DATABASE [{DB_NAME}]"))
+        print(f"Database '{DB_NAME}' is ready.")
+    except exc.SQLAlchemyError as e:
+        print(f"Error creating database: {e}")
+        time.sleep(5)
+        init_db()
+    finally:
+        master_engine.dispose()
+
+    db_engine = create_engine(f"mssql+pymssql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+    return db_engine
+# ===============================
+
+engine = init_db()
 Base = declarative_base()
 Session = sessionmaker(bind=engine)
 
@@ -34,7 +57,8 @@ Base.metadata.create_all(engine)
 def get_order_total(order_id):
     """Fetch order total from Orders service"""
     try:
-        response = requests.get(f"http://localhost:5003/orders/{order_id}")
+        # Sửa: Dùng tên service 'orders' thay vì 'localhost'
+        response = requests.get(f"http://orders:5003/orders/{order_id}")
         if response.status_code == 200:
             order = response.json()
             return order.get('total', 0)
