@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+table {
+  border-collapse: separate;
+  border-spacing: 0 8px;
+}
+
+th {
+  background-color: #fbcfe8;
+  color: #6b21a8;
+  border-radius: 8px;
+}
+
+td {
+  background-color: white;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+button {
+  transition: 0.2s;
+}
+
+button:hover {
+  transform: scale(1.05);
+}
